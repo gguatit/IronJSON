@@ -1,4 +1,4 @@
-name = "ironjson"
+name = "iron-json"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
