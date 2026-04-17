@@ -1,4 +1,3 @@
-use crate::config;
 use serde_json::Value;
 
 pub fn mask_fields(value: &mut Value, fields: &[String]) {
@@ -16,15 +15,31 @@ fn mask_fields_impl(value: &mut Value, fields: &[String]) {
                 if direct_match {
                     apply_mask(val);
                 } else {
-                    let nested_fields: Vec<String> = fields
-                        .iter()
-                        .filter_map(|f| {
-                            let prefix = format!("{key}.");
-                            f.strip_prefix(&prefix).map(|s| s.to_string())
-                        })
-                        .collect();
-                    if !nested_fields.is_empty() {
-                        mask_fields_impl(val, &nested_fields);
+                    let has_nested = fields.iter().any(|f| {
+                        f.len() > key.len() + 1
+                            && f.as_bytes().get(key.len()) == Some(&b'.')
+                            && &f[..key.len()] == key.as_str()
+                    });
+                    if has_nested {
+                        let nested_fields: Vec<&str> = fields
+                            .iter()
+                            .filter_map(|f| {
+                                let expected = key.len() + 1;
+                                if f.len() > expected
+                                    && f.as_bytes().get(key.len()) == Some(&b'.')
+                                    && &f[..key.len()] == key.as_str()
+                                {
+                                    Some(&f[expected..])
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if !nested_fields.is_empty() {
+                            let nested_owned: Vec<String> =
+                                nested_fields.iter().map(|s| s.to_string()).collect();
+                            mask_fields_impl(val, &nested_owned);
+                        }
                     }
                 }
             }
@@ -68,24 +83,22 @@ fn mask_string(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
-    let mask_char = config::MASK_CHAR;
-    let display_len = config::DEFAULT_MASK_DISPLAY_LEN.min(s.len());
+    let mask_char = '*';
+    let char_count = s.chars().count();
+    let display_len = 4usize.min(char_count);
 
-    if s.len() <= display_len {
-        return mask_char.to_string().repeat(s.len());
+    if char_count <= display_len {
+        return mask_char.to_string().repeat(char_count);
     }
 
-    let prefix_len = s.len() - display_len;
+    let prefix_len = char_count - display_len;
     let mut result = String::with_capacity(s.len());
     for _ in 0..prefix_len {
         result.push(mask_char);
     }
-    result.push_str(&s[prefix_len..]);
+    let suffix: String = s.chars().skip(prefix_len).collect();
+    result.push_str(&suffix);
     result
-}
-
-pub fn mask_value_completely(s: &str) -> String {
-    config::MASK_CHAR.to_string().repeat(s.len().max(3))
 }
 
 #[cfg(test)]
@@ -141,5 +154,14 @@ mod tests {
         let mut v = json!({"credit_card": 1234567890});
         mask_fields(&mut v, &["credit_card".to_string()]);
         assert_eq!(v["credit_card"], 0);
+    }
+
+    #[test]
+    fn test_mask_multibyte_utf8() {
+        let mut v = json!({"token": "안녕하세요123"});
+        mask_fields(&mut v, &["token".to_string()]);
+        let masked = v["token"].as_str().unwrap();
+        assert!(masked.ends_with("e123"));
+        assert!(masked.starts_with("***"));
     }
 }

@@ -20,13 +20,18 @@ fn remove_fields_impl(value: &mut Value, fields: &[String]) {
                 map.remove(&key);
             }
 
-            for (key, val) in map.iter_mut() {
-                let nested_fields: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| strip_prefix(f, key))
-                    .collect();
-                if !nested_fields.is_empty() {
-                    remove_fields_impl(val, &nested_fields);
+            let nested: Vec<(String, String)> = map
+                .keys()
+                .flat_map(|key| {
+                    fields.iter().filter_map(move |f| {
+                        strip_prefix(f, key).map(|rest: &str| (key.clone(), rest.to_string()))
+                    })
+                })
+                .collect();
+
+            for (key, nested_path) in nested {
+                if let Some(val) = map.get_mut(&key) {
+                    remove_fields_impl(val, &[nested_path]);
                 }
             }
         }
@@ -61,10 +66,13 @@ fn is_nested_match(field_path: &str, key: &str) -> bool {
     }
 }
 
-fn strip_prefix(field_path: &str, prefix: &str) -> Option<String> {
-    let full = format!("{prefix}.");
-    if field_path.starts_with(&full) {
-        Some(field_path[full.len()..].to_string())
+fn strip_prefix<'a>(field_path: &'a str, prefix: &str) -> Option<&'a str> {
+    let expected = prefix.len() + 1;
+    if field_path.len() > expected
+        && field_path.as_bytes().get(prefix.len()) == Some(&b'.')
+        && &field_path[..prefix.len()] == prefix
+    {
+        Some(&field_path[expected..])
     } else {
         None
     }
@@ -99,10 +107,7 @@ mod tests {
             {"name": "Jane", "password": "s2"}
         ]);
         remove_fields(&mut v, &["password".to_string()]);
-        assert_eq!(
-            v,
-            json!([{"name": "John"}, {"name": "Jane"}])
-        );
+        assert_eq!(v, json!([{"name": "John"}, {"name": "Jane"}]));
     }
 
     #[test]

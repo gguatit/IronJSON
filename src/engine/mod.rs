@@ -5,11 +5,62 @@ pub mod transform;
 pub mod validator;
 
 use crate::error::IronError;
-use crate::rule::{Direction, Rule, RuleEngine};
+use crate::rule::{Direction, Rule, RuleEngine, SchemaDef};
 
 pub struct JsonEngine {
     rule_engine: RuleEngine,
     parser: parser::SafeParser,
+}
+
+struct MergedRule {
+    validate: Option<SchemaDef>,
+    remove_fields: Vec<String>,
+    mask_fields: Vec<String>,
+    rename: std::collections::HashMap<String, String>,
+    value_map: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+}
+
+fn count_segments(path: &str) -> usize {
+    path.split('/').filter(|s| !s.is_empty()).count()
+}
+
+fn merge_rules(rules: &[&Rule]) -> MergedRule {
+    let mut validate_schema: Option<SchemaDef> = None;
+    let mut remove_fields: Vec<String> = Vec::new();
+    let mut mask_fields: Vec<String> = Vec::new();
+    let mut rename: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut value_map: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>> =
+        std::collections::HashMap::new();
+
+    for rule in rules {
+        if rule.validate.is_some() && validate_schema.is_none() {
+            validate_schema = rule.validate.clone();
+        }
+        for f in &rule.remove_fields {
+            if !remove_fields.contains(f) {
+                remove_fields.push(f.clone());
+            }
+        }
+        for f in &rule.mask_fields {
+            if !mask_fields.contains(f) {
+                mask_fields.push(f.clone());
+            }
+        }
+        for (k, v) in &rule.rename {
+            rename.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &rule.value_map {
+            value_map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    MergedRule {
+        validate: validate_schema,
+        remove_fields,
+        mask_fields,
+        rename,
+        value_map,
+    }
 }
 
 impl JsonEngine {
@@ -33,15 +84,20 @@ impl JsonEngine {
     ) -> Result<serde_json::Value, IronError> {
         let mut value = self.parser.parse(body)?;
 
-        let rules = self.rule_engine.find_matching_rules(path, method, direction);
+        let mut rules = self.rule_engine.find_matching_rules(path, method, direction);
 
         if rules.is_empty() {
             return Ok(value);
         }
 
-        for rule in &rules {
-            self.apply_rule(&mut value, rule)?;
-        }
+        rules.sort_by(|a, b| {
+            let a_s = count_segments(&a.path);
+            let b_s = count_segments(&b.path);
+            b_s.cmp(&a_s)
+        });
+
+        let merged = merge_rules(&rules);
+        self.apply_rule(&mut value, &merged)?;
 
         Ok(value)
     }
@@ -53,16 +109,20 @@ impl JsonEngine {
         direction: Direction,
         value: &mut serde_json::Value,
     ) -> Result<(), IronError> {
-        let rules = self.rule_engine.find_matching_rules(path, method, direction);
-
-        for rule in &rules {
-            self.apply_rule(value, rule)?;
+        let mut rules = self.rule_engine.find_matching_rules(path, method, direction);
+        if !rules.is_empty() {
+            rules.sort_by(|a, b| {
+                let a_s = count_segments(&a.path);
+                let b_s = count_segments(&b.path);
+                b_s.cmp(&a_s)
+            });
+            let merged = merge_rules(&rules);
+            self.apply_rule(value, &merged)?;
         }
-
         Ok(())
     }
 
-    fn apply_rule(&self, value: &mut serde_json::Value, rule: &Rule) -> Result<(), IronError> {
+    fn apply_rule(&self, value: &mut serde_json::Value, rule: &MergedRule) -> Result<(), IronError> {
         if let Some(schema) = &rule.validate {
             validator::validate(value, schema)?;
         }
@@ -141,5 +201,17 @@ mod tests {
             .process("/health", "GET", Direction::Request, body.as_bytes())
             .unwrap();
         assert_eq!(result, json!({"data": 123}));
+    }
+
+    #[test]
+    fn test_rule_merge_dedup() {
+        let engine = test_engine();
+        let body = r#"{"email":"a@b.com","password":"x","token":"sk-abc","secret":"y"}"#;
+        let result = engine
+            .process("/api/users", "POST", Direction::Request, body.as_bytes())
+            .unwrap();
+        assert!(result.get("password").is_none());
+        assert!(result.get("secret").is_none());
+        assert!(result["token"].as_str().unwrap().contains('*'));
     }
 }

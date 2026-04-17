@@ -22,7 +22,8 @@ pub struct Rule {
     #[serde(default)]
     pub rename: std::collections::HashMap<String, String>,
     #[serde(default)]
-    pub value_map: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+    pub value_map:
+        std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -62,6 +63,16 @@ pub struct SchemaDef {
     pub min_items: Option<usize>,
     #[serde(default)]
     pub max_items: Option<usize>,
+    #[serde(default)]
+    pub enum_values: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub const_value: Option<serde_json::Value>,
+    #[serde(default)]
+    pub additional_properties: Option<bool>,
+    #[serde(default)]
+    pub unique_items: Option<bool>,
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 fn default_schema_type() -> String {

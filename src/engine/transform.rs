@@ -4,10 +4,19 @@ pub fn rename_keys(value: &mut Value, renames: &std::collections::HashMap<String
     if renames.is_empty() {
         return;
     }
-    rename_keys_impl(value, renames);
+    let global_renames: std::collections::HashMap<String, String> = renames
+        .iter()
+        .filter(|(k, _)| !k.contains('.'))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    rename_keys_impl(value, renames, &global_renames);
 }
 
-fn rename_keys_impl(value: &mut Value, renames: &std::collections::HashMap<String, String>) {
+fn rename_keys_impl(
+    value: &mut Value,
+    renames: &std::collections::HashMap<String, String>,
+    global_renames: &std::collections::HashMap<String, String>,
+) {
     match value {
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
@@ -21,37 +30,51 @@ fn rename_keys_impl(value: &mut Value, renames: &std::collections::HashMap<Strin
                     }
                 }
 
-                let nested_renames: std::collections::HashMap<String, String> = renames
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        let prefix = format!("{old_key}.");
-                        k.strip_prefix(&prefix)
-                            .map(|rest| (rest.to_string(), v.clone()))
-                    })
-                    .collect();
-
-                if !nested_renames.is_empty() {
-                    let lookup_key = new_key_opt.as_ref().unwrap_or(&old_key);
-                    if let Some(nested) = map.get_mut(lookup_key) {
-                        rename_keys_impl(nested, &nested_renames);
+                let has_nested = renames.keys().any(|k| {
+                    k.len() > old_key.len() + 1
+                        && k.as_bytes().get(old_key.len()) == Some(&b'.')
+                        && &k[..old_key.len()] == old_key.as_str()
+                });
+                if has_nested {
+                    let nested_renames: std::collections::HashMap<String, String> = renames
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            let expected = old_key.len() + 1;
+                            if k.len() > expected
+                                && k.as_bytes().get(old_key.len()) == Some(&b'.')
+                                && &k[..old_key.len()] == old_key.as_str()
+                            {
+                                Some((&k[expected..], v.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect();
+                    if !nested_renames.is_empty() {
+                        let lookup_key = new_key_opt.as_ref().unwrap_or(&old_key);
+                        if let Some(nested) = map.get_mut(lookup_key) {
+                            let nested_global: std::collections::HashMap<String, String> =
+                                nested_renames
+                                    .iter()
+                                    .filter(|(k, _)| !k.contains('.'))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
+                            rename_keys_impl(nested, &nested_renames, &nested_global);
+                        }
                     }
                 }
             }
 
-            let global_renames: std::collections::HashMap<String, String> = renames
-                .iter()
-                .filter(|(k, _)| !k.contains('.'))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
             if !global_renames.is_empty() {
                 for val in map.values_mut() {
-                    rename_keys_impl(val, &global_renames);
+                    rename_keys_impl(val, renames, global_renames);
                 }
             }
         }
         Value::Array(arr) => {
             for item in arr.iter_mut() {
-                rename_keys_impl(item, renames);
+                rename_keys_impl(item, renames, global_renames);
             }
         }
         _ => {}
@@ -83,20 +106,33 @@ fn apply_value_map_impl(
                     }
                 }
 
-                let nested_maps: std::collections::HashMap<
-                    String,
-                    std::collections::HashMap<String, Value>,
-                > = maps
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        let prefix = format!("{key}.");
-                        k.strip_prefix(&prefix)
-                            .map(|rest| (rest.to_string(), v.clone()))
-                    })
-                    .collect();
-
-                if !nested_maps.is_empty() {
-                    apply_value_map_impl(val, &nested_maps);
+                let has_nested = maps.keys().any(|k| {
+                    k.len() > key.len() + 1
+                        && k.as_bytes().get(key.len()) == Some(&b'.')
+                        && &k[..key.len()] == key.as_str()
+                });
+                if has_nested {
+                    let nested_maps: std::collections::HashMap<
+                        String,
+                        std::collections::HashMap<String, Value>,
+                    > = maps
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            let expected = key.len() + 1;
+                            if k.len() > expected
+                                && k.as_bytes().get(key.len()) == Some(&b'.')
+                                && &k[..key.len()] == key.as_str()
+                            {
+                                Some((&k[expected..], v.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect();
+                    if !nested_maps.is_empty() {
+                        apply_value_map_impl(val, &nested_maps);
+                    }
                 } else {
                     let global_maps: std::collections::HashMap<
                         String,
@@ -141,6 +177,16 @@ mod tests {
         let mut v = original.clone();
         rename_keys(&mut v, &std::collections::HashMap::new());
         assert_eq!(v, original);
+    }
+
+    #[test]
+    fn test_rename_nested() {
+        let mut v = json!({"user": {"internal_id": 42, "name": "John"}});
+        let mut renames = std::collections::HashMap::new();
+        renames.insert("user.internal_id".to_string(), "id".to_string());
+        rename_keys(&mut v, &renames);
+        assert_eq!(v["user"]["id"], 42);
+        assert!(v["user"].get("internal_id").is_none());
     }
 
     #[test]
